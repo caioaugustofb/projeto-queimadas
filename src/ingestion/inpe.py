@@ -96,7 +96,7 @@ def ingest_daily(state: StateStore, load_id: str, today: date | None = None) -> 
             f"A pasta guarda ~30 dias; se rodar a ingestão com menos frequência, perde dias.")
 
     results: list[dict[str, Any]] = []
-    for day in sorted(d for d in available if first_daily <= d <= today):
+    for day in sorted(d for d in available if start <= d <= today):
         url = _url(config.INPE_DIARIO_FILE_PATH, data=day.strftime("%Y%m%d"))
         try:
             head = http.head_info(url)
