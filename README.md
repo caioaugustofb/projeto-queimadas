@@ -21,7 +21,13 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Depois, na raiz do repositório, rode as etapas em ordem:
+Depois, na raiz do repositório, rode o pipeline inteiro com um comando:
+
+```bash
+python -m scripts.run_pipeline
+```
+
+Ou cada etapa separada, na mesma ordem:
 
 ```bash
 python -m src.ingestion.run_bronze   # baixa INPE e IBGE para data/bronze (alguns minutos)
@@ -47,6 +53,8 @@ src/
   silver/      dim_municipio, ibge_indicador_anual, foco_calor
   gold/        focos_municipio_mes, ml_base
   ml/          modelo, avaliação e ranking
+scripts/       run_pipeline.py: executa Bronze, Silver, Gold e modelo em ordem
+notebooks/     exploração e resultados (só lê as tabelas geradas)
 tests/         testes offline da Bronze
 docs/          dicionário de dados, ML-Ready, decisão, ingestão, figuras
 data/          gerado pelo pipeline, fora do Git (bronze, silver, gold, quarantine, _state, raw)
