@@ -28,14 +28,16 @@ O arquivo diário do dia D só é ingerido depois de regravado em D+1 (regra: `L
 3. API: SHA-256 do corpo igual → não grava. Estado em `data/_state/bronze_state.json`.
 Prova: `checks.summarize_bronze(storage.read_bronze("inpe_focos_diario"))` mantém `cargas == 1`
 por objeto depois da segunda rodada (ver `test_idempotencia_rodar_duas_vezes`).
-Se o manifest for apagado, a Silver deduplica por `_record_hash`.
+Se o manifest for apagado, a Silver deduplica os focos por `id_foco` (hash de satélite + data/hora + lat + lon).
 
 ## Quarentena
 `data/quarantine/<dataset>/<load_id>.jsonl`: arquivo/ZIP corrompido, 404, arquivo vazio, encoding ilegível,
 linhas malformadas (amostra + resumo), resposta de API inválida, período não publicado, dias ausentes na janela do INPE.
 
-## Pendências conhecidas
-- Códigos de variável do SIDRA em `config.IBGE_TABELAS` não foram conferidos contra a API.
-- Esquema dos ZIPs anuais do INPE não verificado (pode não ter `municipio_id`).
-- Licenças de uso do INPE e do IBGE ainda sem confirmação.
-- Dados do INPE misturam satélite de referência (anual) e todos os satélites (mensal/diário): filtrar na Silver.
+## Verificado na primeira carga real (19/10/2026)
+- Resultado: 63 cargas `ok`, 16 `skipped`, 2.637.959 linhas gravadas. Os dois avisos foram anos que a tabela 6579 não tem (2022 e 2023).
+- Códigos do SIDRA em `config.IBGE_TABELAS` conferidos: "População residente estimada", "Efetivo dos rebanhos – Bovino" e "PIB a preços correntes", com 144 municípios por ano.
+- Nomes dos arquivos mensais e diários do INPE confirmados.
+- Os ZIPs anuais não trazem `municipio_id`, `satelite` nem as variáveis de clima (colunas: `id_bdq, foco_id, lat, lon, data_pas, pais, estado, municipio, bioma`). A Silver faz o join por nome e assume o satélite de referência.
+- Dados do INPE misturam satélite de referência (anual) e todos os satélites (mensal/diário): a Silver filtra o AQUA_M-T.
+- Licenças: ver a seção Fontes do README.
