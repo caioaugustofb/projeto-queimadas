@@ -9,7 +9,7 @@ Projeto Integrador da disciplina de Ciência de Dados, Ciência da Computação,
 ## Integrantes
 
 - Caio Augusto (GitHub: caioaugustofb)
-- Pedro (GitHub: callilpedro)
+- Pedro Augusto (GitHub: callilpedro)
 
 ## Como executar do zero
 
