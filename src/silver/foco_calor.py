@@ -3,6 +3,8 @@ Silver: foco_calor
 Granularidade: uma linha por foco de calor detectado no Pará pelo satélite de referência.
 Chave primária: id_foco (hash de satélite + data/hora UTC + lat + lon).
 Fontes (Bronze): inpe_focos_anual, inpe_focos_mensal, inpe_focos_diario.
+Join com a Silver dim_municipio: pelo municipio_id quando o INPE traz (2026),
+pelo nome normalizado quando não traz (arquivos anuais 2013-2025).
 """
 from __future__ import annotations
 
@@ -16,12 +18,13 @@ import pandas as pd
 from src import config
 from src.common import checks, metadata, quarantine, storage
 from src.ingestion.inpe import DS_ANUAL, DS_DIARIO, DS_MENSAL
+from src.silver.util import TZ_LOCAL, ler, normalizar_texto, salvar
 
 log = logging.getLogger(__name__)
 
-DATASET = "silver_foco_calor"
-SILVER_DIR = Path(config.DATA_DIR) / "silver"
-TZ_LOCAL = "America/Belem"
+NOME = "foco_calor"
+DATASET = f"silver_{NOME}"
+# Os arquivos anuais não trazem a coluna de satélite; conferido nos dados de 2026
 SATELITE_REFERENCIA_PADRAO = "AQUA_M-T"
 
 # Nome na Silver -> nomes possíveis na fonte (o anual e o mensal/diário podem diferir)
@@ -40,17 +43,12 @@ ALIASES = {
     "bioma": ["bioma"],
     "frp": ["frp"],
 }
-OBRIGATORIAS = ["lat", "lon", "data_hora_utc", "estado"]
+OBRIGATORIAS = ["lat", "lon", "data_hora_utc", "estado", "municipio"]
 NUMERICAS = ["dias_sem_chuva", "precipitacao", "risco_fogo", "frp"]
 
 # Retângulo que contém o Pará, com folga de ~0.1 grau
 LAT_MIN, LAT_MAX = -9.95, 2.70
 LON_MIN, LON_MAX = -59.00, -45.95
-
-
-def sem_acento(s: pd.Series) -> pd.Series:
-    return (s.str.normalize("NFKD").str.encode("ascii", "ignore")
-             .str.decode("ascii").str.upper().str.strip())
 
 
 def _arquivos(dataset: str) -> list[Path]:
@@ -82,7 +80,7 @@ def padronizar_colunas(df: pd.DataFrame, origem: str) -> pd.DataFrame:
 
 
 def filtrar_para(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
-    mask = sem_acento(df["estado"]) == "PARA"
+    mask = normalizar_texto(df["estado"]) == "PARA"
     return df[mask].copy(), int((~mask).sum())
 
 
@@ -150,7 +148,22 @@ def filtrar_satelite_referencia(df: pd.DataFrame) -> tuple[pd.DataFrame, set[str
     return df[manter].copy(), ref, int((~manter).sum())
 
 
-def separar_invalidos(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+def atribuir_cod_ibge(df: pd.DataFrame, dim: pd.DataFrame, rel: Counter) -> pd.DataFrame:
+    por_nome = normalizar_texto(df["municipio"]).map(dict(zip(dim["nome_normalizado"], dim["cod_ibge"])))
+    if "cod_ibge" not in df:
+        df["cod_ibge"] = pd.NA
+
+    veio_da_fonte = df["cod_ibge"].notna() & (df["cod_ibge"] != "")
+    rel["cod_ibge_da_fonte"] = int(veio_da_fonte.sum())
+    rel["cod_ibge_pelo_nome"] = int((~veio_da_fonte & por_nome.notna()).sum())
+    # Onde a fonte traz os dois, o código pelo nome tem que bater com o da fonte
+    rel["cod_ibge_diverge_do_nome"] = int((veio_da_fonte & por_nome.notna() & (df["cod_ibge"] != por_nome)).sum())
+
+    df["cod_ibge"] = df["cod_ibge"].where(veio_da_fonte, por_nome)
+    return df
+
+
+def separar_invalidos(df: pd.DataFrame, codigos_validos: set[str]) -> tuple[pd.DataFrame, pd.DataFrame]:
     motivos = pd.Series(pd.NA, index=df.index, dtype="object")
 
     def marcar(mask: pd.Series, motivo: str) -> None:
@@ -159,8 +172,7 @@ def separar_invalidos(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     marcar(df[["lat", "lon", "data_hora_utc"]].isna().any(axis=1), "campo_obrigatorio_invalido")
     marcar(~df["lat"].between(LAT_MIN, LAT_MAX) | ~df["lon"].between(LON_MIN, LON_MAX),
            "coordenada_fora_do_para")
-    if "cod_ibge" in df:
-        marcar(~df["cod_ibge"].str.fullmatch(r"15\d{5}", na=False), "cod_ibge_fora_do_padrao")
+    marcar(~df["cod_ibge"].isin(codigos_validos), "municipio_sem_correspondencia_ibge")
 
     validos = df[motivos.isna()].copy()
     invalidos = df[motivos.notna()].copy()
@@ -197,6 +209,7 @@ def deduplicar(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
 def construir() -> tuple[pd.DataFrame, Counter, set[str]]:
     run_id = metadata.new_load_id(DATASET)
     rel: Counter = Counter()
+    dim = ler("dim_municipio")
 
     partes = []
     for ds in (DS_ANUAL, DS_MENSAL, DS_DIARIO):
@@ -207,8 +220,9 @@ def construir() -> tuple[pd.DataFrame, Counter, set[str]]:
     df = pd.concat(partes, ignore_index=True)
     df = tipar(df)
     df, ref, rel["fora_satelite_referencia"] = filtrar_satelite_referencia(df)
+    df = atribuir_cod_ibge(df, dim, rel)
 
-    df, invalidos = separar_invalidos(df)
+    df, invalidos = separar_invalidos(df, set(dim["cod_ibge"]))
     for (motivo, objeto), grupo in invalidos.groupby(["_motivo", "_source_object"], dropna=False):
         linhas = grupo.drop(columns="_motivo").to_dict(orient="records")
         quarantine.quarantine_rows(DATASET, objeto, run_id, motivo, linhas)
@@ -223,23 +237,15 @@ def construir() -> tuple[pd.DataFrame, Counter, set[str]]:
     return df, rel, ref
 
 
-def salvar(df: pd.DataFrame) -> Path:
-    # Reconstruída inteira a partir da Bronze a cada execução: rodar 2x dá o mesmo resultado
-    path = SILVER_DIR / "foco_calor.parquet"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(path, index=False)
-    return path
-
-
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     df, rel, ref = construir()
-    path = salvar(df)
-    print(f"Satélite(s) de referência: {sorted(ref)}")
+    path = salvar(df, NOME)
+    print(f"[{NOME}] satélite(s) de referência: {sorted(ref)}")
     for chave, valor in rel.items():
-        print(f"{chave}: {valor}")
-    print(f"PK id_foco verificada: {df['id_foco'].nunique()} valores únicos em {len(df)} linhas")
-    print(f"Salvo em {path}")
+        print(f"[{NOME}] {chave}: {valor}")
+    print(f"[{NOME}] PK id_foco verificada: {df['id_foco'].nunique()} valores únicos em {len(df)} linhas")
+    print(f"[{NOME}] salvo em {path}")
 
 
 if __name__ == "__main__":
